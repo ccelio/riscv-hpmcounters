@@ -9,13 +9,17 @@
 #define read_csr_safe(reg) ({ register long __tmp asm("a0"); \
   asm volatile ("csrr %0, " #reg : "=r"(__tmp)); \
   __tmp; })
-  
-//#define NUM_COUNTERS (32)
+
+#define MAX_SNAPSHOTS (2)
 #define NUM_COUNTERS (48)
-static long init_counters[NUM_COUNTERS]; // value of counter at start
-static long counters[NUM_COUNTERS];
 static char* counter_names[NUM_COUNTERS];
-#define INSTRET_ID (1)
+static long init_counters [NUM_COUNTERS]; // value of counter at start
+static long counters      [NUM_COUNTERS*MAX_SNAPSHOTS];
+static size_t step = 0; // increment every time handle_stats is called
+
+// use sprintf to lesson load on debug interface
+#define CHAR_PER_LINE (40)
+#define MAX_BUFFER_SZ (CHAR_PER_LINE * NUM_COUNTERS)
 
 enum StatState
 {
@@ -25,19 +29,47 @@ enum StatState
    MAX
 };
 
+int bytes_added(int result)
+{
+   if (result > 0) {
+      return result;
+   } else {
+      printf ("Error in sprintf. Res: %d\n", result);
+      return 0;
+   }
+}
+
+// mark true when inside the sig_handler - set to false once finished.
+// prevents us double-printing data.
+static sig_atomic_t lock = 0;
+
 #if 1
 static int handle_stats(int enable)
 {
-   int i = 0;
+   sigset_t sig_set;
+   sigemptyset(&sig_set);
+   sigaddset(&sig_set, SIGTERM);
+
+   if (sigprocmask(SIG_BLOCK, &sig_set, NULL) < 0) {
+      perror ("sigprocmask failed");
+      return 1;
+   }
+
+   if (lock)
+      printf("in_function true! Are we terminating while trying to handle wakeup stats?\n");
+   lock = 1;
+
+   int i = 0;         
 #define READ_CTR(name) do { \
       while (i >= NUM_COUNTERS) ; \
       long csr = read_csr_safe(name); \
       if (enable == INIT)   { init_counters[i] = csr; counters[i] = csr; counter_names[i] = #name; } \
-      if (enable == WAKEUP) { counters[i] = csr - init_counters[i]; } \
-      if (enable == FINISH) { counters[i] = csr - init_counters[i]; } \
+      if (enable == WAKEUP) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
+      if (enable == FINISH) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
       i++; \
    } while (0)
-   READ_CTR(cycle);   READ_CTR(instret);
+   READ_CTR(cycle);
+   READ_CTR(instret);
    READ_CTR(hpmcounter3);
    READ_CTR(hpmcounter4);
    READ_CTR(hpmcounter5);
@@ -67,32 +99,42 @@ static int handle_stats(int enable)
    READ_CTR(hpmcounter29);
    READ_CTR(hpmcounter30);
    READ_CTR(hpmcounter31);
-#if 0
-   READ_CTR(0xcc0);  READ_CTR(0xcc1);  READ_CTR(0xcc2);  READ_CTR(0xcc3);
-   READ_CTR(0xcc4);  READ_CTR(0xcc5);  READ_CTR(0xcc6);  READ_CTR(0xcc7);
-   READ_CTR(0xcc8);  READ_CTR(0xcc9);  READ_CTR(0xcca); READ_CTR(0xccb);
-   READ_CTR(0xccc); READ_CTR(0xccd); READ_CTR(0xcce); READ_CTR(0xccf);
-//   READ_CTR(uarch0);  READ_CTR(uarch1);  READ_CTR(uarch2);  READ_CTR(uarch3);
-//   READ_CTR(uarch4);  READ_CTR(uarch5);  READ_CTR(uarch6);  READ_CTR(uarch7);
-//   READ_CTR(uarch8);  READ_CTR(uarch9);  READ_CTR(uarch10); READ_CTR(uarch11);
-//   READ_CTR(uarch12); READ_CTR(uarch13); READ_CTR(uarch14); READ_CTR(uarch15);
-#endif
+
+   step++;
+   if (step % 10 == 0) printf("step: %d\n", step);
 
 #undef READ_CTR
-   if (enable == FINISH) {
-      for (int x = 0; x < NUM_COUNTERS; x++) {
-         if (counters[x]) {
-            printf("##@@ %s = %ld (total)\n", counter_names[x], counters[x]);
+   printf ("enable: %d, step: %d\n", enable, step);
+   if (enable == FINISH || (enable == WAKEUP && (step) == MAX_SNAPSHOTS)) {
+      for (int s = 0; s < step; s++) {
+         char buffer [MAX_BUFFER_SZ];
+         int length = 0;
+         for (int x = 0; x < NUM_COUNTERS; x++) {
+            long c = counters[x + (s*NUM_COUNTERS)];
+            if (enable == FINISH && s == (step-1) && c) {
+               length += bytes_added(sprintf(buffer+length, "##@@ %s = %ld (total)\n", counter_names[x], c));
+            }
+            else if (c) {
+               length += bytes_added(sprintf(buffer+length, "##  %s = %ld\n", counter_names[x], c));
+            }
+//            printf("length: %d\n");
          }
+         printf(buffer);
+//         printf("length: %d\n");
       }
    }
-   else if (enable == WAKEUP) {
-      for (int x = 0; x < NUM_COUNTERS; x++) {
-         if (counters[x]) {
-            printf("##  %s = %ld\n", counter_names[x], counters[x]);
-         }
-      }
+
+   step = step % MAX_SNAPSHOTS;
+   printf("Leaving Function.----");
+   lock = 0;
+   printf("Leaving Function2.\n");
+   
+   if (sigprocmask(SIG_UNBLOCK, &sig_set, NULL) < 0) {
+      perror ("sigprocmask unblock failed");
+      return 1;
    }
+
+
    return 0;
 }
 #else
@@ -120,7 +162,7 @@ int main(int argc, char** argv)
    }
    else
    {
-      printf("Starting\n");
+      printf("Starting: counter array size: %d\n", sizeof(counters));
       handle_stats(INIT);
       while (1)
       {

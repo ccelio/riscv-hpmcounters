@@ -1,7 +1,5 @@
 
-CC=riscv64-unknown-linux-gnu-g++
-#CC=riscv64-unknown-linux-gnu-gcc
-#CC=gcc -std=c99
+CC=riscv64-unknown-linux-gnu-gcc
 CFLAGS=-static -O2
 LDFLAGS=
 
@@ -12,7 +10,6 @@ rv_counters: rv_counters.c Makefile
  
 run: rv_counters
 	spike pk ./rv_counters
-#	./rv_counters
 
 clean:
 	rm -f rv_counters *.o
