@@ -3,6 +3,10 @@
 #include <unistd.h>
 #include <signal.h>
 
+// TODO
+// time how long print out takes
+// move to STL to dynamically change size of array.
+//
 // In setStats, we might trap reading uarch-specific counters.
 // The trap handler will skip over the instruction and write 0,
 // but only if a0 is the destination register.
@@ -10,7 +14,7 @@
   asm volatile ("csrr %0, " #reg : "=r"(__tmp)); \
   __tmp; })
 
-#define MAX_SNAPSHOTS (2)
+#define MAX_SNAPSHOTS (1000)
 #define NUM_COUNTERS (48)
 static char* counter_names[NUM_COUNTERS];
 static long init_counters [NUM_COUNTERS]; // value of counter at start
@@ -39,10 +43,6 @@ int bytes_added(int result)
    }
 }
 
-// mark true when inside the sig_handler - set to false once finished.
-// prevents us double-printing data.
-static sig_atomic_t lock = 0;
-
 #if 1
 static int handle_stats(int enable)
 {
@@ -55,15 +55,11 @@ static int handle_stats(int enable)
       return 1;
    }
 
-   if (lock)
-      printf("in_function true! Are we terminating while trying to handle wakeup stats?\n");
-   lock = 1;
-
    int i = 0;         
 #define READ_CTR(name) do { \
       while (i >= NUM_COUNTERS) ; \
       long csr = read_csr_safe(name); \
-      if (enable == INIT)   { init_counters[i] = csr; counters[i] = csr; counter_names[i] = #name; } \
+      if (enable == INIT)   { init_counters[i] = csr; counters[i] = 0; counter_names[i] = #name; } \
       if (enable == WAKEUP) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
       if (enable == FINISH) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
       i++; \
@@ -117,23 +113,17 @@ static int handle_stats(int enable)
             else if (c) {
                length += bytes_added(sprintf(buffer+length, "##  %s = %ld\n", counter_names[x], c));
             }
-//            printf("length: %d\n");
          }
          printf(buffer);
-//         printf("length: %d\n");
       }
    }
 
    step = step % MAX_SNAPSHOTS;
-   printf("Leaving Function.----");
-   lock = 0;
-   printf("Leaving Function2.\n");
    
    if (sigprocmask(SIG_UNBLOCK, &sig_set, NULL) < 0) {
       perror ("sigprocmask unblock failed");
       return 1;
    }
-
 
    return 0;
 }
