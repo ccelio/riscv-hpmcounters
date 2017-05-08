@@ -2,11 +2,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <vector>
+#include <array>
 
-// TODO
-// time how long print out takes
-// move to STL to dynamically change size of array.
-//
 // In setStats, we might trap reading uarch-specific counters.
 // The trap handler will skip over the instruction and write 0,
 // but only if a0 is the destination register.
@@ -14,14 +12,16 @@
   asm volatile ("csrr %0, " #reg : "=r"(__tmp)); \
   __tmp; })
 
-#define MAX_SNAPSHOTS (1000)
-#define NUM_COUNTERS (48)
-static char* counter_names[NUM_COUNTERS];
-static long init_counters [NUM_COUNTERS]; // value of counter at start
-static long counters      [NUM_COUNTERS*MAX_SNAPSHOTS];
-static size_t step = 0; // increment every time handle_stats is called
+#define NUM_COUNTERS (7)
+//#define NUM_COUNTERS (32)
+typedef std::array<long, NUM_COUNTERS> snapshot_t;
 
-// use sprintf to lesson load on debug interface
+static char const*               counter_names[NUM_COUNTERS];
+static snapshot_t                init_counters;
+static std::vector <snapshot_t>  counters;
+
+
+// use sprintf to attempt to lesson load on debug interface
 #define CHAR_PER_LINE (40)
 #define MAX_BUFFER_SZ (CHAR_PER_LINE * NUM_COUNTERS)
 
@@ -46,6 +46,9 @@ int bytes_added(int result)
 #if 1
 static int handle_stats(int enable)
 {
+   long tsc_start = read_csr_safe(cycle);
+   long irt_start = read_csr_safe(instret);
+
    sigset_t sig_set;
    sigemptyset(&sig_set);
    sigaddset(&sig_set, SIGTERM);
@@ -55,71 +58,79 @@ static int handle_stats(int enable)
       return 1;
    }
 
+   static size_t step = 0; // increment every time handle_stats is called
+
    int i = 0;         
+   snapshot_t snapshot;
 #define READ_CTR(name) do { \
-      while (i >= NUM_COUNTERS) ; \
-      long csr = read_csr_safe(name); \
-      if (enable == INIT)   { init_counters[i] = csr; counters[i] = 0; counter_names[i] = #name; } \
-      if (enable == WAKEUP) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
-      if (enable == FINISH) { counters[i + (step*NUM_COUNTERS)] = csr - init_counters[i]; } \
-      i++; \
+      if (i < NUM_COUNTERS) { \
+         long csr = read_csr_safe(name); \
+         if (enable == INIT)   { init_counters[i] = csr; snapshot[i] = 0; counter_names[i] = #name; } \
+         if (enable == WAKEUP) { snapshot[i] = csr - init_counters[i]; } \
+         if (enable == FINISH) { snapshot[i] = csr - init_counters[i]; } \
+         i++; \
+      } \
    } while (0)
    READ_CTR(cycle);
    READ_CTR(instret);
    READ_CTR(hpmcounter3);
    READ_CTR(hpmcounter4);
    READ_CTR(hpmcounter5);
-   READ_CTR(hpmcounter6);
-   READ_CTR(hpmcounter7);
-   READ_CTR(hpmcounter8);
-   READ_CTR(hpmcounter9);
-   READ_CTR(hpmcounter10);
-   READ_CTR(hpmcounter11);
-   READ_CTR(hpmcounter12);
-   READ_CTR(hpmcounter13);
-   READ_CTR(hpmcounter14);
-   READ_CTR(hpmcounter15);
-   READ_CTR(hpmcounter16);
+   //READ_CTR(hpmcounter6);
+   //READ_CTR(hpmcounter7);
+   //READ_CTR(hpmcounter8);
+   //READ_CTR(hpmcounter9);
+   //READ_CTR(hpmcounter10);
+   //READ_CTR(hpmcounter11);
+   //READ_CTR(hpmcounter12);
+   //READ_CTR(hpmcounter13);
+   //READ_CTR(hpmcounter14);
+   //READ_CTR(hpmcounter15);
+   //READ_CTR(hpmcounter16);
    READ_CTR(hpmcounter17);
-   READ_CTR(hpmcounter18);
-   READ_CTR(hpmcounter19);
-   READ_CTR(hpmcounter20);
-   READ_CTR(hpmcounter21);
-   READ_CTR(hpmcounter22);
-   READ_CTR(hpmcounter23);
-   READ_CTR(hpmcounter24);
-   READ_CTR(hpmcounter25);
-   READ_CTR(hpmcounter26);
-   READ_CTR(hpmcounter27);
-   READ_CTR(hpmcounter28);
-   READ_CTR(hpmcounter29);
-   READ_CTR(hpmcounter30);
+   //READ_CTR(hpmcounter18);
+   //READ_CTR(hpmcounter19);
+   //READ_CTR(hpmcounter20);
+   //READ_CTR(hpmcounter21);
+   //READ_CTR(hpmcounter22);
+   //READ_CTR(hpmcounter23);
+   //READ_CTR(hpmcounter24);
+   //READ_CTR(hpmcounter25);
+   //READ_CTR(hpmcounter26);
+   //READ_CTR(hpmcounter27);
+   //READ_CTR(hpmcounter28);
+   //READ_CTR(hpmcounter29);
+   //READ_CTR(hpmcounter30);
    READ_CTR(hpmcounter31);
 
+   counters.push_back(snapshot);
+
+//   printf("Snapshot Time in cycles : %ld\n", read_csr_safe(cycle) - tsc_start);
+//   printf("Snapshot Time in instret: %ld\n", read_csr_safe(instret) - irt_start);
+   if (step % 10 == 0) printf("heartbeat: %d\n", step);
    step++;
-   if (step % 10 == 0) printf("step: %d\n", step);
 
 #undef READ_CTR
-   printf ("enable: %d, step: %d\n", enable, step);
-   if (enable == FINISH || (enable == WAKEUP && (step) == MAX_SNAPSHOTS)) {
-      for (int s = 0; s < step; s++) {
-         char buffer [MAX_BUFFER_SZ];
-         int length = 0;
-         for (int x = 0; x < NUM_COUNTERS; x++) {
-            long c = counters[x + (s*NUM_COUNTERS)];
-            if (enable == FINISH && s == (step-1) && c) {
-               length += bytes_added(sprintf(buffer+length, "##@@ %s = %ld (total)\n", counter_names[x], c));
-            }
-            else if (c) {
-               length += bytes_added(sprintf(buffer+length, "##  %s = %ld\n", counter_names[x], c));
+//   if (enable == FINISH) { 
+   if (enable == FINISH || step % 30 == 0) { 
+      for (auto & element : counters) {
+//         char buffer [MAX_BUFFER_SZ];
+//         int length = 0;
+         for (int i = 0; i < NUM_COUNTERS; i++) {
+            long c = element[i];
+            if (c) {
+//               length += bytes_added(sprintf(buffer+length, "##  %s = %ld\n", counter_names[i], c));
+               printf("##  %s = %ld\n", counter_names[i], c);
             }
          }
-         printf(buffer);
+//         printf(buffer);
       }
+      if (enable != FINISH) counters.clear();
+
+//      printf("Print Time in cycles : %ld\n", read_csr_safe(cycle) - tsc_start);
+//      printf("Print Time in instret: %ld\n", read_csr_safe(instret) - irt_start);
    }
 
-   step = step % MAX_SNAPSHOTS;
-   
    if (sigprocmask(SIG_UNBLOCK, &sig_set, NULL) < 0) {
       perror ("sigprocmask unblock failed");
       return 1;
@@ -156,7 +167,8 @@ int main(int argc, char** argv)
       handle_stats(INIT);
       while (1)
       {
-         usleep(100000);
+         usleep(100000); // 100e6 cycles
+//         usleep(50000);  // 50M cycles
          handle_stats(WAKEUP);
       }
       printf("Exiting\n");
